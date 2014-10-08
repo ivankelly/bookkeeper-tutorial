@@ -161,11 +161,70 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
         return lastDisplayedEntry;
     }
 
+    EntryId follow(EntryId skipPast) throws Exception {
+        List<Long> ledgers = null;
+        while (ledgers == null) {
+            try {
+                byte[] ledgerListBytes = curator.getData()
+                    .forPath(DICE_LOG);
+                ledgers = listFromBytes(ledgerListBytes);
+                if (skipPast.getLedgerId() != -1) {
+                    ledgers = ledgers.subList(ledgers.indexOf(skipPast.getLedgerId()),
+                                              ledgers.size());
+                }
+            } catch (KeeperException.NoNodeException nne) {
+                Thread.sleep(1000);
+            }
+        }
+
+        EntryId lastReadEntry = skipPast;
+        while (!leader) {
+            for (long previous : ledgers) {
+                boolean isClosed = false;
+                long nextEntry = 0;
+                while (!isClosed && !leader) {
+                    if (lastReadEntry.getLedgerId() == previous) {
+                        nextEntry = lastReadEntry.getEntryId() + 1;
+                    }
+                    isClosed = bookkeeper.isClosed(previous);
+                    LedgerHandle lh = bookkeeper.openLedgerNoRecovery(previous,
+                            BookKeeper.DigestType.MAC, DICE_PASSWD);
+
+                    if (nextEntry <= lh.getLastAddConfirmed()) {
+                        Enumeration<LedgerEntry> entries
+                            = lh.readEntries(nextEntry,
+                                             lh.getLastAddConfirmed());
+                        while (entries.hasMoreElements()) {
+                            LedgerEntry e = entries.nextElement();
+                            byte[] entryData = e.getEntry();
+                            System.out.println("Value = " + Ints.fromByteArray(entryData)
+                                               + ", epoch = " + lh.getId()
+                                               + ", following");
+                            lastReadEntry = new EntryId(previous, e.getEntryId());
+                        }
+                    }
+                    if (isClosed) {
+                        break;
+                    }
+                    Thread.sleep(1000);
+                }
+
+            }
+            byte[] ledgerListBytes = curator.getData()
+                .forPath(DICE_LOG);
+            ledgers = listFromBytes(ledgerListBytes);
+            ledgers = ledgers.subList(ledgers.indexOf(lastReadEntry.getLedgerId())+1, ledgers.size());
+        }
+        return lastReadEntry;
+    }
+
     void playDice() throws Exception {
         EntryId lastDisplayedEntry = new EntryId(-1, -1);
         while (true) {
             if (leader) {
                 lastDisplayedEntry = lead(lastDisplayedEntry);
+            } else {
+                lastDisplayedEntry = follow(lastDisplayedEntry);
             }
         }
     }
