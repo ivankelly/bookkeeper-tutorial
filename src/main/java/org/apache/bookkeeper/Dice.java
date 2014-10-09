@@ -77,7 +77,8 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
         curator.close();
     }
 
-    void lead() throws Exception {
+    EntryId lead(EntryId skipPast) throws Exception {
+        EntryId lastDisplayedEntry = skipPast;
         Stat stat = new Stat();
         List<Long> ledgers;
         boolean mustCreate = false;
@@ -89,22 +90,37 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
             ledgers = new ArrayList<Long>();
             mustCreate = true;
         }
-        for (Long previous : ledgers) {
+
+        List<Long> toRead = ledgers;
+        if (skipPast.getLedgerId() != -1) {
+            toRead = ledgers.subList(ledgers.indexOf(skipPast.getLedgerId()),
+                                     ledgers.size());
+        }
+
+        long nextEntry = skipPast.getEntryId() + 1;
+        for (Long previous : toRead) {
             LedgerHandle lh;
             try {
                 lh = bookkeeper.openLedger(previous,
                         BookKeeper.DigestType.MAC, DICE_PASSWD);
             } catch (BKException.BKLedgerRecoveryException e) {
-                return;
+                return lastDisplayedEntry;
+            }
+
+            if (nextEntry > lh.getLastAddConfirmed()) {
+                nextEntry = 0;
+                continue;
             }
             Enumeration<LedgerEntry> entries
-                = lh.readEntries(0, lh.getLastAddConfirmed());
+                = lh.readEntries(nextEntry, lh.getLastAddConfirmed());
 
             while (entries.hasMoreElements()) {
-                byte[] entryData = entries.nextElement().getEntry();
+                LedgerEntry e = entries.nextElement();
+                byte[] entryData = e.getEntry();
                 System.out.println("Value = " + Ints.fromByteArray(entryData)
                                    + ", epoch = " + lh.getId()
                                    + ", catchup");
+                lastDisplayedEntry = new EntryId(lh.getId(), e.getEntryId());
             }
         }
 
@@ -116,7 +132,7 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
             try {
                 curator.create().forPath(DICE_LOG, ledgerListBytes);
             } catch (KeeperException.NodeExistsException nne) {
-                return;
+                return lastDisplayedEntry;
             }
         } else {
             try {
@@ -124,7 +140,7 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
                     .withVersion(stat.getVersion())
                     .forPath(DICE_LOG, ledgerListBytes);
             } catch (KeeperException.BadVersionException bve) {
-                return;
+                return lastDisplayedEntry;
             }
         }
 
@@ -132,21 +148,24 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
             while (leader) {
                 Thread.sleep(1000);
                 int nextInt = r.nextInt(6) + 1;
-                lh.addEntry(Ints.toByteArray(nextInt));
+                long entryId = lh.addEntry(Ints.toByteArray(nextInt));
                 System.out.println("Value = " + nextInt
                                    + ", epoch = " + lh.getId()
                                    + ", leading");
+                lastDisplayedEntry = new EntryId(lh.getId(), entryId);
             }
             lh.close();
         } catch (BKException e) {
-            return;
+            // let it fall through to the return
         }
+        return lastDisplayedEntry;
     }
 
     void playDice() throws Exception {
+        EntryId lastDisplayedEntry = new EntryId(-1, -1);
         while (true) {
             if (leader) {
-                lead();
+                lastDisplayedEntry = lead(lastDisplayedEntry);
             }
         }
     }
@@ -157,6 +176,24 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
             d.playDice();
         } finally {
             d.close();
+        }
+    }
+
+    static class EntryId {
+        final long ledgerId;
+        final long entryId;
+
+        EntryId(long ledgerId, long entryId) {
+            this.ledgerId = ledgerId;
+            this.entryId = entryId;
+        }
+
+        long getLedgerId() {
+            return ledgerId;
+        }
+
+        long getEntryId() {
+            return entryId;
         }
     }
 
