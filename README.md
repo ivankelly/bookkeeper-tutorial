@@ -1,7 +1,5 @@
 This tutorial aims to show you how to build a replicated distributed system using bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. This tutorial does not cover the setup of a distributed cluster, but you can run a local cluster on your machine by running:
 
-You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
-
 ```
 $ bookkeeper-server/bin/bookkeeper localbookie 6
 ```
@@ -9,6 +7,8 @@ $ bookkeeper-server/bin/bookkeeper localbookie 6
 This will start up a local zookeeper instance with 6 bookie servers. Any data written to this cluster will be removed when you kill the process.
 
 The code for this tutorial is available at https://github.com/ivankelly/bookkeeper-tutorial/. Each section has a link with points to a tag for the completed code for that section.
+
+You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
 
 # The base application
 
@@ -62,9 +62,9 @@ Value = 3
 
 To achieve this common view in multiple instances of the program, we need each instance to agree on what the next number in the sequence will be. For example, the instances must agree that 4 is the first number and 2 is the second number and 5 is the third number and so on. This is a difficult problem, especially in the case that any instance may go away at any time, and messages between the instances can be lost or reordered.
 
-Luckily, there are already algorithms to solve this. [Paxos](http://en.wikipedia.org/wiki/Paxos_%28computer_science%29) is the most well known, and there are other variations such as [ZAB](http://zookeeper.apache.org) and [Raft](http://en.wikipedia.org/wiki/Raft_%28computer_science%29). [This video](https://www.youtube.com/watch?v=JEpsBg0AO6o) gives a good overview about how these algorithms usually look. They all look fairly similar.
+Luckily, there are already algorithms to solve this. [Paxos](http://en.wikipedia.org/wiki/Paxos_%28computer_science%29) is an abstract algorithm to implement this kind of agreement, while [Zab](http://zookeeper.apache.org) and [Raft](http://en.wikipedia.org/wiki/Raft_%28computer_science%29) are more practical protocols. [This video](https://www.youtube.com/watch?v=JEpsBg0AO6o) gives a good overview about how these algorithms usually look. They all have a similar core.
 
-It would be possible to run the Paxos to agree on each number in the sequence. Running Paxos each time can be expensive. What ZAB and Raft do is that they use a Paxos-like algorithm to elect a leader. The leader then decides what the sequence of events should be, in a log, which the other instances can then follow to maintain the same state as the leader.
+It would be possible to run the Paxos to agree on each number in the sequence. Running Paxos each time can be expensive. What Zab and Raft do is that they use a Paxos-like algorithm to elect a leader. The leader then decides what the sequence of events should be, in a log, which the other instances can then follow to maintain the same state as the leader.
 
 Bookkeeper provides the functionality for the second part of the protocol, allowing a leader to write a log and have multiple follower tailing the log. Bookkeeper does not do leader election. You will need a zookeeper or raft instance for that.
 
@@ -341,7 +341,7 @@ Once we have the list, we loop through them, opening the ledgers and printing th
 
 Once we have read all the previous ledgers, we create a new one and add it to the list. We must make sure this list is updated before writing to the ledger to avoid losing data. If #create() or #setData() throw an exception, it means that someone is trying to update the list concurrently. We must examine if we are still leader, and try again if we are. The retry is handled by the loop in #playDice().
 
-We can then write to the ledger as before. However, now we have to take care to handle the BKException. If we recieve an exception, it may mean that someone has fenced the ledger we are writing to. This means that someone else has opened it using #openLedger, so they must think that they are the leader. Like in the case of concurrent modifications to the ledger list, we must examine if we are still leader and then try again if so.
+We can then write to the ledger as before. However, now we have to take care to handle the BKException. If we receive an exception, it may mean that someone has fenced the ledger we are writing to. This means that someone else has opened it using #openLedger, so they must think that they are the leader. Like in the case of concurrent modifications to the ledger list, we must examine if we are still leader and then try again if so.
 
 Run a couple on instance of this on your machine. You'll see that when the leader changes, it will print out the history of what was written by previous leaders. However, we have a bug! When a leader changes, it will print out the whole history, even if it has been leader before. We need to keep track of which updates we have seen. 
 
@@ -512,7 +512,7 @@ While we are still leader, we loop over all ledgers in the ledgers list, printin
 
 For each ledger we enter into an inner loop. First we check if the ledger has been closed. If so, once we have read all the entries that we can, we need to reopen the ledger to check for any new entries. We continue like this until the ledger is either closed, or we become leader.
 
-Note that we are using #openLedgerNoRecovery here. The value returned by last add confirmed will change after each opening if there are new entries which can be read. The last add confirmed is a variable maintained by the leader. It is the last entry written for which it has recieved an ack quorum of acknowledgements. In our case, this means that the entry has been acknowledged on at least 2 bookies. It also guarantees that each entry before it in that ledger has been acknowledged on 2 bookies.
+Note that we are using #openLedgerNoRecovery here. The value returned by last add confirmed will change after each opening if there are new entries which can be read. The last add confirmed is a variable maintained by the leader. It is the last entry written for which it has received an ack quorum of acknowledgements. In our case, this means that the entry has been acknowledged on at least 2 bookies. It also guarantees that each entry before it in that ledger has been acknowledged on 2 bookies.
 
 Once we have read all entries, we check isClosed to see if we need to check this ledger again. If not, we break out of the loop and move onto the next ledger. Otherwise we wait a second and try again.
 
