@@ -1,4 +1,5 @@
-This tutorial aims to show you how to build a replicated distributed system using bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. This tutorial does not cover the setup of a distributed cluster, but you can run a local cluster on your machine by running:
+This tutorial aims to show you how to build a replicated distributed system using bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
+This tutorial does not cover the setup of a distributed cluster, but you can run a local cluster on your machine by running:
 
 ```
 $ bookkeeper-server/bin/bookkeeper localbookie 6
@@ -7,8 +8,6 @@ $ bookkeeper-server/bin/bookkeeper localbookie 6
 This will start up a local zookeeper instance with 6 bookie servers. Any data written to this cluster will be removed when you kill the process.
 
 The code for this tutorial is available at https://github.com/ivankelly/bookkeeper-tutorial/. Each section has a link with points to a tag for the completed code for that section.
-
-You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
 
 # The base application
 
