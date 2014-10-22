@@ -480,7 +480,7 @@ First we must modify `playDice()` to go into a following state when we're not th
         }
 ```
 
-The first part of following is almost identical to leading. We read the list of ledgers from ZooKeeper and trim the list to only include ledgers which we have displayed already. A thing to note here, is that if we go into following mode during the first run of the application, and the leader hasn't created the list of ledgers in ZooKeeper yet we will get an exception. If this occurs we try again after 1 second.
+The first part of following is almost identical to leading. We read the list of ledgers from ZooKeeper and trim the list to only include ledgers which we haven't displayed already. A thing to note here, is that if we go into following mode during the first run of the application, and the leader hasn't created the list of ledgers in ZooKeeper yet we will get an exception. If this occurs we try again after 1 second.
 
 Once we have the list, we go into the main tailing loop.
 
