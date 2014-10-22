@@ -1,11 +1,11 @@
-This tutorial aims to show you how to build a replicated distributed system using bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
+This tutorial aims to show you how to build a replicated distributed system using Bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
 This tutorial does not cover the setup of a distributed cluster, but you can run a local cluster on your machine by running:
 
 ```
 $ bookkeeper-server/bin/bookkeeper localbookie 6
 ```
 
-This will start up a local zookeeper instance with 6 bookie servers. Any data written to this cluster will be removed when you kill the process.
+This will start up a local zookeeper instance with 6 bookie servers, as bookkeeper storage servers are known. Any data written to this cluster will be removed when you kill the process.
 
 The code for this tutorial is available at https://github.com/ivankelly/bookkeeper-tutorial/. Each section has a link with points to a tag for the completed code for that section.
 
@@ -34,7 +34,7 @@ public class Dice {
 }
 ```
 
-We want to make sure that multiple instances of this application, possibly running on separate machines will all see the same exact sequence of random numbers, even in the case of some machines becoming unavailable. This tutorial will show you how.
+Our goal is to have multiple instances of this application, possibly running on different machine, which each display the exact same sequence of numbers. If one the the instances crashes or becomes unable to communicate with the others in any way, it should still not diverge from the sequence of numbers. This tutorial will show you how to achieve this.
 
 To start, download the base application, compile and run it.
 ```
@@ -63,9 +63,9 @@ To achieve this common view in multiple instances of the program, we need each i
 
 Luckily, there are already algorithms to solve this. [Paxos](http://en.wikipedia.org/wiki/Paxos_%28computer_science%29) is an abstract algorithm to implement this kind of agreement, while [Zab](http://zookeeper.apache.org) and [Raft](http://en.wikipedia.org/wiki/Raft_%28computer_science%29) are more practical protocols. [This video](https://www.youtube.com/watch?v=JEpsBg0AO6o) gives a good overview about how these algorithms usually look. They all have a similar core.
 
-It would be possible to run the Paxos to agree on each number in the sequence. Running Paxos each time can be expensive. What Zab and Raft do is that they use a Paxos-like algorithm to elect a leader. The leader then decides what the sequence of events should be, in a log, which the other instances can then follow to maintain the same state as the leader.
+It would be possible to run the Paxos to agree on each number in the sequence. However, running Paxos each time can be expensive. What Zab and Raft do is that they use a Paxos-like algorithm to elect a leader. The leader then decides what the sequence of events should be, putting them in a log, which the other instances can then follow to maintain the same state as the leader.
 
-Bookkeeper provides the functionality for the second part of the protocol, allowing a leader to write a log and have multiple follower tailing the log. Bookkeeper does not do leader election. You will need a zookeeper or raft instance for that.
+Bookkeeper provides the functionality for the second part of the protocol, allowing a leader to write events to a log and have multiple followers tailing the log. However, bookkeeper does not do leader election. You will need a zookeeper or raft instance for that purpose.
 
 
 ## Why not just use zookeeper for everything?
@@ -74,7 +74,7 @@ There are a number of reasons:
  2. A zookeeper ensemble of multiple machines is limited to one log. You may want one log per resource, which will become expensive very quickly.
  3. Adding extra machines to a zookeeper ensemble does not increase capacity nor throughput.
 
-Bookkeeper can be viewed as a means of exposing zookeeper replicated log to applications in a scalable fashion. We still use zookeeper to maintain consistency guarantees.
+Bookkeeper can be viewed as a means of exposing zookeeper's replicated log to applications in a scalable fashion. However, we still use zookeeper to maintain consistency guarantees.
 
 **TL;DR You need to elect a leader instance**
 
@@ -105,7 +105,7 @@ Mode: standalone
 Node count: 16
 ```
 
-To interact with zookeeper, we’ll use the curator recipes library rather than the stock zookeeper one. Getting things right with the zookeeper client can be tricky, and curator removes a lot of the pointy corners for you. In fact, curator even provides a leader election recipe, so we need to do very little work.
+To interact with zookeeper, we’ll use the [Curator](https://curator.apache.org/) client rather than the stock zookeeper client. Getting things right with the zookeeper client can be tricky, and curator removes a lot of the pointy corners for you. In fact, curator even provides a leader election recipe, so we need to do very little work to get leader election in our application.
 
 ```java
 public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
@@ -127,9 +127,11 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
     }
 ```
 
-In the constructor for Dice, we need to create the curator client. We specify four things when creating the client, the location of the zookeeper service, the session timeout, the connect timeout and the retry policy. The session timeout is the zookeeper concept. If the zookeeper server doesn’t hear anything from the client for this amount of time, any leases which the client has will be timed out. This is important in leader election. For leader election, the curator client will take a lease out on ELECTION_PATH. The first instance to take the lease will become leader and the rest will become followers, but their claim on the lease will remain in the cue. If the first instance then goes away, once the session times out, the lease will be released and the next instance in the queue will become the leader. The call to #autoRequeue() will make the client queue itself again if it loses the lease for some other reason, such as if it was still alive, but it a garbage collection cycle caused it to lose its session, and thereby its lease. I’ve set the lease to be quite low so that when we test out leader election, transitions will be quite quick. The optimum length for session timeout depends very much on the use case. The other parameters are the connection timeout, i.e. the amount of time it will spend trying to connect to a zookeeper server before giving up, and the retry policy. The retry policy specifies how the client should respond to transient errors, such as connection loss. Operations that fail with transient errors can be retried, and this argument specifies how often the retries should occur.
+In the constructor for Dice, we need to create the curator client. We specify four things when creating the client, the location of the zookeeper service, the session timeout, the connect timeout and the retry policy.
 
-Finally, you’ll have noticed that Dice now extends LeaderSelectorListenerAdapter and implements Closeable. Closeable is there to close the resource we have initialized in the constructor, the curator client and the leaderSelector. LeaderSelectorListenerAdapter is a callback that the leaderSelector uses to notify the instance that it is now the leader. It is passed as the third argument to LeaderSelector().
+The session timeout is a zookeeper concept. If the zookeeper server doesn’t hear anything from the client for this amount of time, any leases which the client holds will be timed out. This is important in leader election. For leader election, the curator client will take a lease on ELECTION_PATH. The first instance to take the lease will become leader and the rest will become followers. However, their claim on the lease will remain in the cue. If the first instance then goes away, due to a crash etc., its session will timeout. Once the session times out, the lease will be released and the next instance in the queue will become the leader. The call to `autoRequeue()` will make the client queue itself again if it loses the lease for some other reason, such as if it was still alive, but it a garbage collection cycle caused it to lose its session, and thereby its lease. I’ve set the lease to be quite low so that when we test out leader election, transitions will be quite quick. The optimum length for session timeout depends very much on the use case. The other parameters are the connection timeout, i.e. the amount of time it will spend trying to connect to a zookeeper server before giving up, and the retry policy. The retry policy specifies how the client should respond to transient errors, such as connection loss. Operations that fail with transient errors can be retried, and this argument specifies how often the retries should occur.
+
+Finally, you’ll have noticed that Dice now extends `LeaderSelectorListenerAdapter` and implements `Closeable`. `Closeable` is there to close the resource we have initialized in the constructor, the curator client and the `leaderSelector`. `LeaderSelectorListenerAdapter` is a callback that the `leaderSelector` uses to notify the instance that it is now the leader. It is passed as the third argument to the `LeaderSelector` constructor.
 
 ```java
     @Override
@@ -149,7 +151,7 @@ Finally, you’ll have noticed that Dice now extends LeaderSelectorListenerAdapt
     }
 ```
 
-takeLeadership is the callback called by LeaderSelector when the instance is leader. It should only return when the instance wants to give up leadership. In our case, we never do so we wait on the current object until we’re interrupted. To signal to the rest of the program that we are leader we set a volatile boolean called leader to true. This is unset after we are interrupted.
+`takeLeadership()` is the callback called by `LeaderSelector` when the instance is leader. It should only return when the instance wants to give up leadership. In our case, we never do so we wait on the current object until we’re interrupted. To signal to the rest of the program that we are leader we set a volatile boolean called leader to true. This is unset after we are interrupted.
 
 ```java
     void playDice() throws InterruptedException {
@@ -163,9 +165,11 @@ takeLeadership is the callback called by LeaderSelector when the instance is lea
     }
 ```
 
-Finally we modify #playDice() to only generate random numbers when it is the leader.
+Finally we modify `playDice()` to only generate random numbers when it is the leader.
 
-Run two instances of the program in two different terminals. You’ll see that one becomes leader and prints numbers and the other just sits there. Now stop the leader using Control-Z. This will pause the process, but it won’t kill it. You will be dropped back to the shell in that terminal. After a couple of seconds, you will see that the other instance has become the leader. Zookeeper will guarantee that only one instance is selected as leader at any time.
+Run two instances of the program in two different terminals. You’ll see that one becomes leader and prints numbers and the other just sits there.
+
+Now stop the leader using Control-Z. This will pause the process, but it won’t kill it. You will be dropped back to the shell in that terminal. After a couple of seconds, the session timeout, you will see that the other instance has become the leader. Zookeeper will guarantee that only one instance is selected as leader at any time.
 
 Now go back to the shell that the original leader was on and wake up the process using fg. You’ll see something like the following:
 
@@ -184,7 +188,7 @@ Value = 1, isLeader = false
 
 Whats this!?! The other instance is leader, but this instance first of all thinks it is leader and generates a number, and then generates a number even though it knows it is not leader. In fact this is perfectly natural. The leader election happens on zookeeper, but it takes time changes in the leader to be propagated to all instances. So a race occurs where an instance thinks it is the leader while zookeeper thinks otherwise.
 
-To solve this problem we need to some way to prevent previous leaders from continuing to think they are leader. Sending a message to the previous leader isn’t an option. Messages may get lost or delayed or the previous leader may be temporarily down. Another way is to use a shared log. All updates are written to the shared log before being applied. A new leader can tell this log to block writes from previous leaders. This is exactly what bookkeeper does.
+To solve this problem we need to some way to prevent previous leaders from continuing to think they are the leader. Sending a message to the previous leader isn’t an option. Messages may get lost or delayed or the previous leader may be temporarily down. Another way is to use a shared log. All updates are written to the shared log before being applied. A new leader can tell this log to block writes from previous leaders. This is exactly what bookkeeper does!
 
 # Writing to the log
 
@@ -203,7 +207,7 @@ Before we get into the business of blocking previous leaders from writing we nee
 
 ```
 
-We construct the bookkeeper client in the Dice constructor and configure the zookeeper server and zookeeper session timeout that it should use. The zookeeper session timeout can be quite large for bookkeeper, as it doesn’t use anything that depends on the session timeout logic. The bookkeeper client should also be closed in Dice#close.
+We construct the bookkeeper client in the `Dice` constructor and configure the zookeeper server and zookeeper session timeout that it should use. The zookeeper session timeout can be quite large for bookkeeper, as it doesn’t use anything that depends on the session timeout logic. The bookkeeper client should also be closed in `Dice#close()`.
 
 ```java
     void lead() throws Exception {
@@ -231,17 +235,17 @@ We construct the bookkeeper client in the Dice constructor and configure the zoo
     }
 ```
 
-When we become the leader, we create a new ledger. A ledger is the basic unit of bookkeeper. It can be thought of as a segment of a larger log. In this case we are only creating a single ledger, but later we will be creating multiple ledgers and connecting them together to create a shared log. For now, we just want to get data into a ledger.
+When we become the leader, we create a new ledger. A ledger is the basic unit of bookkeeper. It can be thought of as a segment of a larger log. At this moment we are only creating a single ledger, but later we will be creating multiple ledgers and connecting them together to create a shared log. For now, we just want to get data into a ledger.
 
 The ledger is created with a 3-3-2 configuration. These are the ensemble, the write quorum and the ack quorum. The ensemble is the number of bookies the data in the ledger will be stored on. All entries may not be stored on all bookies if the ensemble is larger than the write quorum. The write quorum is the number of bookies each entry is written to. The ack quorum is the number of bookies we must get a response from before we acknowledge the write to the client. In this case, there are 3 bookies, we write to all 3 every time, but we acknowledge to the client when we've received a response from 2. If the ensemble is larger than the write quorum, then entries will be striped across the bookies.
 
-The digest type and password are for checksumming. They prevent clients from overwriting each others data in a misconfigured system. They're actually unnecessary, but the client api requires them.
+The digest type and password are used for checksumming. They prevent clients from overwriting each others data in a misconfigured system. They're actually unnecessary in this example, but the client api requires them.
 
-Once the ledger is created we can write to it. #addEntry will append an entry onto the end of the ledger. Entries are byte arrays, so we convert the randomly generated integer into a byte array, using guava's Ints utility, before adding it to the ledger.
+Once the ledger is created we can write to it. `addEntry()` will append an entry onto the end of the ledger. Entries are byte arrays, so we convert the randomly generated integer into a byte array, using [Guava](https://code.google.com/p/guava-libraries/)'s Ints utility, before adding it to the ledger.
 
 Once we are finished with a ledger we must close it. This is actually an important step and it fixes the content of the ledger. From this point on the ledger is immutable. It cannot be reopened for writing and its contents cannot be modified.
 
-Of course, we don't save a reference to the ledger anywhere, so once we have written it, noone else can ever access it, even to read it. This is what we will deal with in the next section.
+Of course, we don't save a reference to the ledger anywhere, so once we have written it, no one else can ever access it, even to read it. This is what we will deal with in the next section.
 
 # Making the log available to others
 
@@ -249,7 +253,7 @@ Of course, we don't save a reference to the ledger anywhere, so once we have wri
 
 Previously we have written to a single ledger. However, we have not provided a way to share this between instances. What's more, as a ledger is immutable, each leader will have to create its own ledger. So ultimately, when the application has run for a while, having changed leaders multiple times, we will end up with a list of ledgers. This list of ledgers represents the log of the application. Any new instance can print the same output as any preexisting instance by simply reading this log.
 
-This list of logs need to be shared among all instances of the program. For this we will use zookeeper. 
+This list of logs needs to be shared among all instances of the application. For this we will use zookeeper. 
 
 ```java
 public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
@@ -294,7 +298,7 @@ We define the path of the zookeeper znode in which we want to store the log. A z
         }
 ```
 
-We read the list of ledgers from DICE_LOG and store the version in stat. As the list of ledgers is in byte form, we need to convert into a java list. If this is the first time running, there will be no list of ledgers, and therefore no znode containing them. In this case a NoNodeException will occur. We take note of this, as it affects how will will update the list later.
+We read the list of ledgers from DICE_LOG and store the version in stat. As the list of ledgers is in byte form, we need to convert into a java list. If this is the first time running, there will be no list of ledgers, and therefore no znode containing them. In this case a `NoNodeException` will occur. We take note of this using `mustCreate`, as it affects how will will update the list later.
 
 Once we have the list, we loop through them, opening the ledgers and printing their contents. It's important to note that the default open operation in bookkeeper is a fencing open. In a fencing open, anyone who is writing to the ledger will receive an exception when they try to write again. This is how we exclude other leaders.
 
@@ -338,11 +342,13 @@ Once we have the list, we loop through them, opening the ledgers and printing th
     }
 ```
 
-Once we have read all the previous ledgers, we create a new one and add it to the list. We must make sure this list is updated before writing to the ledger to avoid losing data. If #create() or #setData() throw an exception, it means that someone is trying to update the list concurrently. We must examine if we are still leader, and try again if we are. The retry is handled by the loop in #playDice().
+Once we have read all the previous ledgers, we create a new one and add it to the list. We must make sure this list is updated before writing to the ledger to avoid losing data. If `create()` or `setData()` throw an exception, it means that someone is trying to update the list concurrently. We must examine if we are still leader, and try again if we are. The retry is handled by the loop in `playDice()`.
 
-We can then write to the ledger as before. However, now we have to take care to handle the BKException. If we receive an exception, it may mean that someone has fenced the ledger we are writing to. This means that someone else has opened it using #openLedger, so they must think that they are the leader. Like in the case of concurrent modifications to the ledger list, we must examine if we are still leader and then try again if so.
+We can then write to the ledger as before. However, now we have to take care to handle the `BKException`. If we receive an exception, it may mean that someone has fenced the ledger we are writing to. This means that someone else has opened it using `openLedger()`, so they must think that they are the leader. Like in the case of concurrent modifications to the ledger list, we must examine if we are still leader and then try again if so.
 
-Run a couple on instance of this on your machine. You'll see that when the leader changes, it will print out the history of what was written by previous leaders. However, we have a bug! When a leader changes, it will print out the whole history, even if it has been leader before. We need to keep track of which updates we have seen. 
+Run a couple of instances of this on your machine. You'll see that when the leader changes, it will print out the history of what was written by previous leaders.
+
+However, we have a bug! When an instance becomes leader, it will print out the whole history, even if it has been leader before. So it is necessary to keep track of which updates we have seen been changes of leadership.
 
 # Tracking the updates
 
@@ -355,7 +361,7 @@ Tracking the updates is fairly simple. We just need to keep a record of the last
         EntryId lastDisplayedEntry = skipPast;
 ```
 
-The signature for #lead() needs to change so that the last displayed update is passed between different invokations. EntryId is a simple data structure, inside which we can store the ledger id and the entry id of the last update we have displayed.
+The signature for `lead()` needs to change so that the last displayed update is passed between different invocations. `EntryId` is a simple data structure, inside which we can store the ledger id and the entry id of the last update we have displayed.
 
 ```java
     EntryId lead(EntryId skipPast) throws Exception {
@@ -395,7 +401,7 @@ The signature for #lead() needs to change so that the last displayed update is p
         ...
 ```
 
-The algorithm for reading also changes. Instead of iterating through all the ledgers in the list we only iterate through any ledger which is greater to or equal to the ledger of the last displayed entry. We also skip past the entry id of the last displayed entry when calling #readEntries. The only special case we need to handle is if the last displayed entry is the last entry of a ledger. In this case, we set nextEntry to zero, and skip to the next ledger.
+The algorithm for reading also changes. Instead of iterating through all the ledgers in the list we only iterate through any ledger which is greater to or equal to the ledger of the last displayed entry. We also skip past the entry id of the last displayed entry when calling `readEntries()`. The only special case we need to handle is if the last displayed entry is the last entry of a ledger. In this case, we set `nextEntry` to zero, and skip to the next ledger.
 
 Any time we do read an entry and display it, we update the last displayed entry to reflect this.
 
@@ -421,15 +427,15 @@ Any time we do read an entry and display it, we update the last displayed entry 
     }
 ```
 
-Finally, we also update the last displayed entry any time we add a new entry to the log. With this change, new leaders will only print numbers which they haven't seen before. You can test this for yourself. Run two instances of the program. Stop the leader with Control-Z, and once the other instance has become leader, resume the first one (fg). Then kill the second leader. When the first leader becomes leader again, it will only print the number which it missed.
+Finally, we also update the last displayed entry any time we add a new entry to the log. With this change, new leaders will only print numbers which they haven't seen before. You can test this for yourself. Run two instances of the application. Stop the leader with Control-Z, and once the other instance has become leader, resume the first one (`fg`). Then kill the second leader. When the first leader becomes leader again, it will only print the number which it missed.
 
 # Tailing the log
 
 [(full code)](https://github.com/ivankelly/bookkeeper-tutorial/tree/tailing)
 
-Of course, it would be nicer if the followers could keep up to date with the leader in the background without having to wait to become leaders themselves. To do this we need to tail the log. For the most part this is very similar to how we read the previous ledgers when we become leader. However, how we open the ledgers is different. When we open the ledgers as leader, we need to ensure that no other instance can write to the ledgers from that point onwards. Therefore, we use a fencing open, which is the default #openLedger call in Bookkeeper. However, for tailing the log, we don't want to stop the leader from writing new updates, so we use a non-fenching open, which is the #openLedgerNoRecovery call in Bookkeeper.
+Of course, it would be nicer if the followers could keep up to date with the leader in the background without having to wait to become leaders themselves. To do this we need to tail the log. For the most part this is very similar to how we read the previous ledgers when we become leader. However, how we open the ledgers is different. When we open the ledgers as leader, we need to ensure that no other instance can write to the ledgers from that point onwards. Therefore, we use a fencing open, which is the default `openLedger()` call in Bookkeeper. However, for tailing the log, we don't want to stop the leader from writing new updates, so we use a non-fenching open, which is the `openLedgerNoRecovery()` call in Bookkeeper.
 
-First we must modify #playDice to go into a following state when we're not the leader.
+First we must modify `playDice()` to go into a following state when we're not the leader.
 ```java
     void playDice() throws Exception {
         EntryId lastDisplayedEntry = new EntryId(-1, -1);
@@ -511,9 +517,9 @@ While we are still leader, we loop over all ledgers in the ledgers list, printin
 
 For each ledger we enter into an inner loop. First we check if the ledger has been closed. If so, once we have read all the entries that we can, we need to reopen the ledger to check for any new entries. We continue like this until the ledger is either closed, or we become leader.
 
-Note that we are using #openLedgerNoRecovery here. The value returned by last add confirmed will change after each opening if there are new entries which can be read. The last add confirmed is a variable maintained by the leader. It is the last entry written for which it has received an ack quorum of acknowledgements. In our case, this means that the entry has been acknowledged on at least 2 bookies. It also guarantees that each entry before it in that ledger has been acknowledged on 2 bookies.
+Note that we are using `openLedgerNoRecovery()` here. The value returned by last add confirmed will change after each opening if there are new entries which can be read. The last add confirmed is a variable maintained by the leader. It is the last entry written for which it has received an ACK quorum of acknowledgements. In our case, this means that the entry has been acknowledged on at least 2 bookies. It also guarantees that each entry before it in that ledger has been acknowledged on 2 bookies.
 
-Once we have read all entries, we check isClosed to see if we need to check this ledger again. If not, we break out of the loop and move onto the next ledger. Otherwise we wait a second and try again.
+Once we have read all entries, we check isClosed to see if we need to check this ledger again. If not, we break out of the loop and move onto the next ledger. Otherwise, we wait a second and try again.
 
 # Wrap up
 
@@ -521,8 +527,8 @@ Now you have a fully distributed dice application. Not very useful, but it shoul
 
 # What's next?
 
-The dice application we've just written is pretty useless. But the principles contained therein could be used to replicate pretty much any service. Imagine a simple key value store. This could be made replicated by adding all create, put and delete operations to a replicated log. Multiple logs could be used if you want to shard your store across many servers. There are many possibilities.
+The dice application we've written is just and example and is pretty useless in the real world. But the principles contained therein could be used to replicate pretty much any service. Imagine a simple key value store. This could be made replicated by adding all create, put and delete operations to a replicated log. Multiple logs could be used if you want to shard your store across many servers. And there are many possibilities.
 
 However, this tutorial doesn't address some issues that would be important in a real implementation. For starters, the log of the dice application will keep growing forever, eventually filling up all your disks and grinding you to a halt. Avoiding this problem depends on your individual usecase. For example, if you have a key value store, you can take a snapshot of the store every so often, and then trim the start of the log to remove anything that had been applied by the time the snapshot was taken. Trimming simply means removing ledgers from the start of the ledger list. For a messaging application, you could keep a record of what each subscriber has consumed and then trim the log based on that.
 
-Note that the tutorial application only uses synchronous APIs. The bookkeeper client does also have asynchronous apis, which allow for higher throughput when writing, but you have to manage your state more carefully.
+Note that the tutorial application only uses synchronous APIs. The bookkeeper client does also have asynchronous APIs, which allow for higher throughput when writing. However, this means that you have to manage your state more carefully.
