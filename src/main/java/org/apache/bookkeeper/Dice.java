@@ -163,7 +163,7 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
 
     EntryId follow(EntryId skipPast) throws Exception {
         List<Long> ledgers = null;
-        while (ledgers == null) {
+        while (ledgers == null && !leader) {
             try {
                 byte[] ledgerListBytes = curator.getData()
                     .forPath(DICE_LOG);
