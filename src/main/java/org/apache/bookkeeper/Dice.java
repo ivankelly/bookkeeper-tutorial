@@ -1,8 +1,5 @@
 package org.apache.bookkeeper;
 
-
-
-
 import com.google.common.primitives.Ints;
 
 import java.io.Closeable;
@@ -11,12 +8,15 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ExecutionException;
 
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.client.BookKeeper;
-import org.apache.bookkeeper.client.LedgerEntry;
-import org.apache.bookkeeper.client.LedgerHandle;
-import org.apache.bookkeeper.client.BKException;
+import org.apache.bookkeeper.client.api.LedgerEntry;
+import org.apache.bookkeeper.client.api.LedgerEntries;
+import org.apache.bookkeeper.client.api.WriteHandle;
+import org.apache.bookkeeper.client.api.ReadHandle;
+import org.apache.bookkeeper.client.api.BKException;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
@@ -93,77 +93,70 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
 
         List<Long> toRead = ledgers;
         if (skipPast.getLedgerId() != -1) {
-            toRead = ledgers.subList(ledgers.indexOf(skipPast.getLedgerId()),
-                                     ledgers.size());
+            toRead = ledgers.subList(ledgers.indexOf(skipPast.getLedgerId()), ledgers.size());
         }
 
         long nextEntry = skipPast.getEntryId() + 1;
         for (Long previous : toRead) {
-            LedgerHandle lh;
-            try {
-                lh = bookkeeper.openLedger(previous,
-                        BookKeeper.DigestType.MAC, DICE_PASSWD);
-            } catch (BKException.BKLedgerRecoveryException e) {
-                return lastDisplayedEntry;
-            }
+            try (ReadHandle reader = bookkeeper.newOpenLedgerOp().withPassword(DICE_PASSWD).withLedgerId(previous).execute().get()) {
+                if (nextEntry > reader.getLastAddConfirmed()) {
+                    nextEntry = 0;
+                    continue;
+                }
 
-            if (nextEntry > lh.getLastAddConfirmed()) {
-                nextEntry = 0;
-                continue;
-            }
-            Enumeration<LedgerEntry> entries
-                = lh.readEntries(nextEntry, lh.getLastAddConfirmed());
-
-            while (entries.hasMoreElements()) {
-                LedgerEntry e = entries.nextElement();
-                byte[] entryData = e.getEntry();
-                System.out.println("Value = " + Ints.fromByteArray(entryData)
-                                   + ", epoch = " + lh.getId()
-                                   + ", catchup");
-                lastDisplayedEntry = new EntryId(lh.getId(), e.getEntryId());
-            }
-        }
-
-        LedgerHandle lh = bookkeeper.createLedger(3, 3, 2,
-                BookKeeper.DigestType.MAC, DICE_PASSWD);
-        ledgers.add(lh.getId());
-        byte[] ledgerListBytes = listToBytes(ledgers);
-        if (mustCreate) {
-            try {
-                curator.create().forPath(DICE_LOG, ledgerListBytes);
-            } catch (KeeperException.NodeExistsException nne) {
-                return lastDisplayedEntry;
-            }
-        } else {
-            try {
-                curator.setData()
-                    .withVersion(stat.getVersion())
-                    .forPath(DICE_LOG, ledgerListBytes);
-            } catch (KeeperException.BadVersionException bve) {
+                try (LedgerEntries entries = reader.read(nextEntry, reader.getLastAddConfirmed()).get()) {
+                    for (LedgerEntry e : entries) {
+                        byte[] entryData = e.getEntryBytes();
+                        System.out.println("Value = " + Ints.fromByteArray(entryData)
+                                           + ", epoch = " + reader.getId() + ", catchup");
+                        lastDisplayedEntry = new EntryId(reader.getId(), e.getEntryId());
+                    }
+                }
+            } catch (ExecutionException e) {
                 return lastDisplayedEntry;
             }
         }
 
-        try {
-            while (leader) {
-                Thread.sleep(1000);
-                int nextInt = r.nextInt(6) + 1;
-                long entryId = lh.addEntry(Ints.toByteArray(nextInt));
-                System.out.println("Value = " + nextInt
-                                   + ", epoch = " + lh.getId()
-                                   + ", leading");
-                lastDisplayedEntry = new EntryId(lh.getId(), entryId);
+        try (WriteHandle writer = bookkeeper.newCreateLedgerOp().withPassword(DICE_PASSWD)
+                .withEnsembleSize(3).withWriteQuorumSize(3).withAckQuorumSize(2)
+                .execute().get()) {
+            ledgers.add(writer.getId());
+
+            byte[] ledgerListBytes = listToBytes(ledgers);
+            if (mustCreate) {
+                try {
+                    curator.create().forPath(DICE_LOG, ledgerListBytes);
+                } catch (KeeperException.NodeExistsException nne) {
+                    return lastDisplayedEntry;
+                }
+            } else {
+                try {
+                    curator.setData()
+                        .withVersion(stat.getVersion())
+                        .forPath(DICE_LOG, ledgerListBytes);
+                } catch (KeeperException.BadVersionException bve) {
+                    return lastDisplayedEntry;
+                }
             }
-            lh.close();
-        } catch (BKException e) {
-            // let it fall through to the return
+
+            try {
+                while (leader) {
+                    Thread.sleep(1000);
+                    int nextInt = r.nextInt(6) + 1;
+                    long entryId = writer.append(Ints.toByteArray(nextInt)).get();
+                    System.out.println("Value = " + nextInt + ", epoch = " + writer.getId() + ", leading");
+                    lastDisplayedEntry = new EntryId(writer.getId(), entryId);
+                }
+            } catch (Exception e) {
+                // let it fall through to the return
+            }
         }
         return lastDisplayedEntry;
     }
 
     EntryId follow(EntryId skipPast) throws Exception {
         List<Long> ledgers = null;
-        while (ledgers == null) {
+        while (ledgers == null && !leader) {
             try {
                 byte[] ledgerListBytes = curator.getData()
                     .forPath(DICE_LOG);
@@ -187,31 +180,29 @@ public class Dice extends LeaderSelectorListenerAdapter implements Closeable {
                         nextEntry = lastReadEntry.getEntryId() + 1;
                     }
                     isClosed = bookkeeper.isClosed(previous);
-                    LedgerHandle lh = bookkeeper.openLedgerNoRecovery(previous,
-                            BookKeeper.DigestType.MAC, DICE_PASSWD);
-
-                    if (nextEntry <= lh.getLastAddConfirmed()) {
-                        Enumeration<LedgerEntry> entries
-                            = lh.readEntries(nextEntry,
-                                             lh.getLastAddConfirmed());
-                        while (entries.hasMoreElements()) {
-                            LedgerEntry e = entries.nextElement();
-                            byte[] entryData = e.getEntry();
-                            System.out.println("Value = " + Ints.fromByteArray(entryData)
-                                               + ", epoch = " + lh.getId()
-                                               + ", following");
-                            lastReadEntry = new EntryId(previous, e.getEntryId());
+                    try (ReadHandle reader
+                            = bookkeeper.newOpenLedgerOp().withPassword(DICE_PASSWD)
+                                        .withLedgerId(previous).withRecovery(false).execute().get()) {
+                        long lac = reader.getLastAddConfirmed();
+                        if (nextEntry <= lac) {
+                            try (LedgerEntries entries = reader.read(nextEntry, lac).get()) {
+                                for (LedgerEntry e : entries) {
+                                    byte[] entryData = e.getEntryBytes();
+                                    System.out.println("Value = " + Ints.fromByteArray(entryData)
+                                                       + ", epoch = " + reader.getId()
+                                                       + ", following");
+                                    lastReadEntry = new EntryId(previous, e.getEntryId());
+                                }
+                            }
                         }
+                        if (isClosed) {
+                            break;
+                        }
+                        Thread.sleep(1000);
                     }
-                    if (isClosed) {
-                        break;
-                    }
-                    Thread.sleep(1000);
                 }
-
             }
-            byte[] ledgerListBytes = curator.getData()
-                .forPath(DICE_LOG);
+            byte[] ledgerListBytes = curator.getData().forPath(DICE_LOG);
             ledgers = listFromBytes(ledgerListBytes);
             ledgers = ledgers.subList(ledgers.indexOf(lastReadEntry.getLedgerId())+1, ledgers.size());
         }
