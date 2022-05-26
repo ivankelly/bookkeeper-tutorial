@@ -1,4 +1,4 @@
-This tutorial aims to show you how to build a replicated distributed system using Bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. You can download the bookkeeper distribution at https://zookeeper.apache.org/bookkeeper/releases.html. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
+This tutorial aims to show you how to build a replicated distributed system using Bookkeeper as the replicated log. Before we start, you will need to have a bookkeeper cluster up and running. You can download the bookkeeper distribution at https://bookkeeper.apache.org/releases. The binary distribution, bookkeeper-server-4.x.x-bin.tar.gz, will be sufficient for the tutorial.
 This tutorial does not cover the setup of a distributed cluster, but you can run a local cluster on your machine by running:
 
 ```
